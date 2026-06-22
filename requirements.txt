@@ -1,0 +1,4 @@
+streamlit
+transformers
+pillow
+torch==2.2.2
