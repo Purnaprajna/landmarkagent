@@ -1,16 +1,14 @@
-streamlit==1.35.0
+streamlit
 
-langchain==0.1.17
-langchain-core==0.1.52
-langchain-community==0.0.38
+langchain
+langchain-core
+langchain-community
+langchain-openai
+langchain-google-genai
 
-langchain-openai==0.1.8
-langchain-google-genai==0.0.9
+duckduckgo-search
+requests
+pillow
 
-duckduckgo-search==5.3.0
-requests==2.31.0
-
-pillow==10.4.0
-
-openai>=1.30.0
-google-generativeai>=0.5.0
+openai
+google-generativeai
