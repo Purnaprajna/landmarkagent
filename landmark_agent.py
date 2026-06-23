@@ -5,8 +5,10 @@ import streamlit as st
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from langchain.agents import initialize_agent, AgentType
-from langchain_community.agent_toolkits.load_tools import load_tools
+from langchain.agents import create_react_agent, AgentExecutor
+from langchain import hub
+
+from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.globals import set_debug
 from langchain.tools import Tool
@@ -122,30 +124,26 @@ def build_vision_chain():
 
 
 def build_agent():
-    
-    tools = [wiki_tool] + load_tools(["ddg-search"])
+    ddg_tool = DuckDuckGoSearchRun()
 
-    return initialize_agent(
-        tools=tools,
+    tools = [
+        wiki_tool,
+        ddg_tool
+    ]
+
+    prompt = hub.pull("hwchase17/react")
+
+    agent = create_react_agent(
         llm=llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        tools=tools,
+        prompt=prompt
+    )
+
+    return AgentExecutor(
+        agent=agent,
+        tools=tools,
         verbose=True,
-        handle_parsing_errors=True,
-        agent_kwargs={
-            "prefix": """
-You are a helpful assistant.
-
-Use tools when necessary.
-
-When using tools, follow this format:
-Action: tool name
-Action Input: input
-
-After observation, continue reasoning.
-
-Finally give a clear answer.
-""",
-        },
+        handle_parsing_errors=True
     )
 
 
@@ -160,7 +158,8 @@ def research_landmark(agent, landmark_name, question):
         f"Landmark: {landmark_name} Question: {question} "
         "Use Wikipedia or DuckDuckGo if needed. Answer briefly and accurately."
     )
-    return agent.invoke({"input": task})["output"]
+    response = agent.invoke({"input": task})
+    return response["output"]
 
 
 def main():
@@ -169,10 +168,9 @@ def main():
     uploaded_file = st.file_uploader("Upload your image", type=["jpg", "png"])
     question = st.text_input("Enter a question about the landmark")
 
-    vision_chain = build_vision_chain()
-    agent = build_agent()
-
     if uploaded_file and question:
+        vision_chain = build_vision_chain()
+        agent = build_agent()
         with st.spinner("Identifying landmark"):
             landmark_name = analyze_uploaded_landmark(uploaded_file, vision_chain)
 
