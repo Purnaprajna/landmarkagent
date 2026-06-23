@@ -1,90 +1,188 @@
+import base64
+import requests
 import streamlit as st
-from PIL import Image
 
-import torch
-from transformers import BlipProcessor, BlipForConditionalGeneration
-from transformers import pipeline
+from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
-# ------------------------------
-# 1. Load Vision Model (BLIP)
-# ------------------------------
-@st.cache_resource
-def load_vision_model():
-    processor = BlipProcessor.from_pretrained(
-        "Salesforce/blip-image-captioning-base"
-    )
-    model = BlipForConditionalGeneration.from_pretrained(
-        "Salesforce/blip-image-captioning-base"
-    )
-    return processor, model
+from langchain.agents import initialize_agent, AgentType
+from langchain_community.agent_toolkits.load_tools import load_tools
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.globals import set_debug
+from langchain.tools import Tool
 
 
-processor, vision_model = load_vision_model()
+st.set_page_config(
+    page_title="Landmark Helper",
+    page_icon="🧭",
+    layout="centered"
+)
 
+with st.sidebar:
+    st.title("Model Configuration")
 
-# ------------------------------
-# 2. Load Text Model (TinyLlama)
-# ------------------------------
-@st.cache_resource
-def load_llm():
-    return pipeline(
-        "text-generation",
-        model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        device_map="auto"
+    provider = st.radio(
+        "Choose Provider",
+        ["OpenAI", "Gemini"]
     )
 
+    api_key = st.text_input(
+        "API Key",
+        type="password"
+    )
 
-llm = load_llm()
+if not api_key:
+    st.info("Enter an API key to continue.")
+    st.stop()
+set_debug(False)
+
+if provider == "OpenAI":
+    vision_llm = ChatOpenAI(
+        model="gpt-4o",
+        api_key=api_key,
+        temperature=0
+    )
+
+    llm = ChatOpenAI(
+        model="gpt-4o",
+        api_key=api_key,
+        temperature=0
+    )
+else:
+    vision_llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash",
+        google_api_key=api_key,
+        temperature=0
+    )
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash",
+        google_api_key=api_key,
+        temperature=0
+    )
 
 
-# ------------------------------
-# 3. Vision Function (Image → Landmark)
-# ------------------------------
-def get_landmark_name(image_file):
-    image = Image.open(image_file).convert("RGB")
+def wiki_search(query):
+    headers = {"User-Agent": "LandmarkHelper/1.0 (student project)"}
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": query,
+        "format": "json",
+    }
 
-    inputs = processor(images=image, return_tensors="pt")
-    out = vision_model.generate(**inputs)
+    response = requests.get(
+        "https://en.wikipedia.org/w/api.php",
+        params=params,
+        headers=headers,
+    )
+    data = response.json()
+    results = data["query"]["search"]
 
-    caption = processor.decode(out[0], skip_special_tokens=True)
+    if not results:
+        return "No results found"
 
-    return caption
+    return results[0]["title"]
 
 
-# ------------------------------
-# 4. Answer Function (LLM reasoning)
-# ------------------------------
-def answer_question(landmark, question):
-    prompt = f"""
+wiki_tool = Tool(
+    name="Wikipedia",
+    func=wiki_search,
+    description="Search Wikipedia for information.",
+)
+
+
+def encode_image(image_file):
+    return base64.b64encode(image_file.read()).decode()
+
+
+def build_vision_chain():
+    vision_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You are a helpful assistant that can identify a landmark. Return only landmark name like Taj mahal ,trump tower without explanation",
+            ),
+            (
+                "human",
+                [
+                    {"type": "text", "text": "return the landmark name"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/jpeg;base64,{image}",
+                            "detail": "low",
+                        },
+                    },
+                ],
+            ),
+        ]
+    )
+    return vision_prompt | vision_llm
+
+
+def build_agent():
+    
+    tools = [wiki_tool] + load_tools(["ddg-search"])
+
+    return initialize_agent(
+        tools=tools,
+        llm=llm,
+        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        verbose=True,
+        handle_parsing_errors=True,
+        agent_kwargs={
+            "prefix": """
 You are a helpful assistant.
 
-Landmark: {landmark}
-Question: {question}
+Use tools when necessary.
 
-Give a short, correct, and simple answer.
-"""
+When using tools, follow this format:
+Action: tool name
+Action Input: input
 
-    result = llm(prompt, max_new_tokens=200)
+After observation, continue reasoning.
 
-    return result[0]["generated_text"]
+Finally give a clear answer.
+""",
+        },
+    )
 
 
-# ------------------------------
-# 5. Streamlit UI
-# ------------------------------
-st.title("🗺️ Landmark Helper (Free AI Version)")
+def analyze_uploaded_landmark(uploaded_file, vision_chain):
+    image_b64 = encode_image(uploaded_file)
+    vision_response = vision_chain.invoke({"image": image_b64})
+    return vision_response.content.strip().split("\n")[0]
 
-uploaded_file = st.file_uploader("Upload an image", type=["jpg", "png", "jpeg"])
-question = st.text_input("Ask a question about the landmark")
 
-if uploaded_file and question:
+def research_landmark(agent, landmark_name, question):
+    task = (
+        f"Landmark: {landmark_name} Question: {question} "
+        "Use Wikipedia or DuckDuckGo if needed. Answer briefly and accurately."
+    )
+    return agent.invoke({"input": task})["output"]
 
-    # Step 1: Vision
-    with st.spinner("Detecting landmark..."):
-        landmark = get_landmark_name(uploaded_file)
-        st.success(f"Detected: {landmark}")
 
-    # Step 2: Answer
-    with st.spinner("Thinking..."):
-        answer = answer_question(landmark, question)
+def main():
+    st.title("Landmark Helper (Vision + ReAct Agent)")
+
+    uploaded_file = st.file_uploader("Upload your image", type=["jpg", "png"])
+    question = st.text_input("Enter a question about the landmark")
+
+    vision_chain = build_vision_chain()
+    agent = build_agent()
+
+    if uploaded_file and question:
+        with st.spinner("Identifying landmark"):
+            landmark_name = analyze_uploaded_landmark(uploaded_file, vision_chain)
+
+        st.success(landmark_name)
+
+        with st.spinner("Researching"):
+            answer = research_landmark(agent, landmark_name, question)
+
         st.write(answer)
+
+
+if __name__ == "__main__":
+    main()
